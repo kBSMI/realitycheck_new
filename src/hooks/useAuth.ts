@@ -19,8 +19,8 @@ export interface AuthController {
   isSignedIn: boolean;
   cloudAuthReady: boolean;
   signInLocalPreview: (email?: string) => void;
-  sendMagicLink: (email: string) => Promise<{ ok: boolean; message: string }>;
-  signInWithGoogle: () => Promise<{ ok: boolean; message: string }>;
+  sendMagicLink: (email: string, returnTo?: string) => Promise<{ ok: boolean; message: string }>;
+  signInWithGoogle: (returnTo?: string) => Promise<{ ok: boolean; message: string }>; 
   signOut: () => Promise<void>;
 }
 
@@ -70,21 +70,21 @@ export function useAuth(): AuthController {
       saveSessionSnapshot(next);
       setSession(next);
     },
-    sendMagicLink: async (email: string) => {
+    sendMagicLink: async (email: string, returnTo?: string) => {
       if (!cloudAuthReady) {
         return { ok: false, message: 'Supabase is not configured. Use local preview mode for this build.' };
       }
-      const result = await signInWithMagicLink(email);
+      const result = await signInWithMagicLink(email, returnTo);
       return {
         ok: Boolean(result.data),
         message: result.error ?? 'Magic link sent. Check your email to continue.',
       };
     },
-    signInWithGoogle: async () => {
+    signInWithGoogle: async (returnTo?: string) => {
       if (!cloudAuthReady) {
         return { ok: false, message: 'Google sign-in is ready for Supabase configuration, but disabled in local preview.' };
       }
-      const result = await signInWithGoogleProvider();
+      const result = await signInWithGoogleProvider(returnTo);
       return {
         ok: Boolean(result.data),
         message: result.error ?? 'Redirecting to Google sign-in.',
