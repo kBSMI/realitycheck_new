@@ -1,5 +1,6 @@
 import { createClient, type Session, type SupabaseClient, type User } from '@supabase/supabase-js';
 import { appConfig, isCloudConfigured } from '../config/appConfig';
+import { getAuthCallbackUrl, getReturnToFromSearch } from './authRedirect';
 
 export interface SupabaseSessionSnapshot {
   accessToken?: string;
@@ -37,7 +38,8 @@ export function getSupabaseClient(): SupabaseClient | null {
       auth: {
         persistSession: true,
         autoRefreshToken: true,
-        detectSessionInUrl: true,
+        detectSessionInUrl: false,
+        flowType: 'pkce',
       },
     });
   }
@@ -92,6 +94,7 @@ export async function refreshSessionSnapshot(): Promise<SupabaseSessionSnapshot 
   if (error) return getSessionSnapshot();
   const snapshot = snapshotFromSession(data.session);
   saveSessionSnapshot(snapshot);
+  if (snapshot?.user?.id) await ensureArcProfile(snapshot).catch(() => undefined);
   return snapshot;
 }
 
@@ -101,27 +104,39 @@ export function subscribeToAuthChanges(onChange: (snapshot: SupabaseSessionSnaps
   const { data } = client.auth.onAuthStateChange((_event, session) => {
     const snapshot = snapshotFromSession(session);
     saveSessionSnapshot(snapshot);
+    if (snapshot?.user?.id) void ensureArcProfile(snapshot);
     onChange(snapshot);
   });
   return () => data.subscription.unsubscribe();
 }
 
-export async function signInWithMagicLink(email: string, redirectTo = appConfig.publicAppUrl): Promise<SupabaseClientResult<true>> {
+export async function ensureArcProfile(session: SupabaseSessionSnapshot): Promise<void> {
+  const client = getSupabaseClient();
+  if (!client || !session.user?.id) return;
+  await client.from('arc_profiles').upsert({
+    id: session.user.id,
+    email: session.user.email,
+    display_name: session.user.email?.split('@')[0] ?? null,
+    updated_at: new Date().toISOString(),
+  }, { onConflict: 'id' });
+}
+
+export async function signInWithMagicLink(email: string, returnTo?: string): Promise<SupabaseClientResult<true>> {
   const client = getSupabaseClient();
   if (!client) return { data: null, error: 'Supabase is not configured.' };
   const { error } = await client.auth.signInWithOtp({
     email,
-    options: { emailRedirectTo: redirectTo },
+    options: { emailRedirectTo: getAuthCallbackUrl(returnTo) },
   });
   return { data: error ? null : true, error: error?.message ?? null };
 }
 
-export async function signInWithGoogle(redirectTo = appConfig.publicAppUrl): Promise<SupabaseClientResult<true>> {
+export async function signInWithGoogle(returnTo?: string): Promise<SupabaseClientResult<true>> {
   const client = getSupabaseClient();
   if (!client) return { data: null, error: 'Supabase is not configured.' };
   const { error } = await client.auth.signInWithOAuth({
     provider: 'google',
-    options: { redirectTo },
+    options: { redirectTo: getAuthCallbackUrl(returnTo) },
   });
   return { data: error ? null : true, error: error?.message ?? null };
 }
@@ -138,4 +153,33 @@ export async function getAuthenticatedUserSnapshot(): Promise<SupabaseSessionSna
   const { data } = await client.auth.getUser();
   const session = await refreshSessionSnapshot();
   return snapshotFromUser(data.user, session?.accessToken);
+}
+
+
+export interface AuthCallbackResult {
+  ok: boolean;
+  returnTo: string;
+  error: string | null;
+}
+
+export async function handleSupabaseAuthCallback(url: string): Promise<AuthCallbackResult> {
+  const parsed = new URL(url, appConfig.publicAppUrl || 'http://localhost:5173');
+  const returnTo = getReturnToFromSearch(parsed.search);
+  const urlError = parsed.searchParams.get('error_description') || parsed.searchParams.get('error');
+  if (urlError) return { ok: false, returnTo, error: urlError };
+
+  const code = parsed.searchParams.get('code');
+  if (!code) return { ok: false, returnTo, error: 'Missing auth callback code. The magic link may be expired or incomplete.' };
+
+  const client = getSupabaseClient();
+  if (!client) return { ok: false, returnTo, error: 'Supabase is not configured.' };
+
+  const { data, error } = await client.auth.exchangeCodeForSession(code);
+  if (error) return { ok: false, returnTo, error: error.message };
+
+  const snapshot = snapshotFromSession(data.session);
+  saveSessionSnapshot(snapshot);
+  if (snapshot?.user?.id) await ensureArcProfile(snapshot).catch(() => undefined);
+
+  return { ok: true, returnTo, error: null };
 }
