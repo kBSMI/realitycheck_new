@@ -1,54 +1,123 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { AlertTriangle, CheckCircle2, Loader2 } from 'lucide-react';
-import { handleSupabaseAuthCallback } from '../lib/supabaseClient';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { supabase, isSupabaseReady } from '../lib/supabaseClient';
+import { getSafeReturnTo } from '../lib/authRedirect';
 
 export default function AuthCallbackPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [status, setStatus] = useState<'loading' | 'success' | 'error'>('loading');
-  const [message, setMessage] = useState('Finishing secure sign-in...');
-  const [returnTo, setReturnTo] = useState('/reality-check');
+  const [message, setMessage] = useState('Completing sign in...');
 
   useEffect(() => {
-    let mounted = true;
-    handleSupabaseAuthCallback(window.location.href).then((result) => {
-      if (!mounted) return;
-      setReturnTo(result.returnTo);
-      if (!result.ok) {
-        setStatus('error');
-        setMessage(result.error ?? 'Sign-in failed. Please request a new magic link.');
-        return;
-      }
-      setStatus('success');
-      setMessage('Signed in. Redirecting...');
-      window.setTimeout(() => navigate(result.returnTo, { replace: true }), 650);
-    });
-    return () => {
-      mounted = false;
-    };
-  }, [navigate]);
+    let cancelled = false;
 
-  const Icon = status === 'loading' ? Loader2 : status === 'success' ? CheckCircle2 : AlertTriangle;
-  const iconClass = status === 'loading' ? 'animate-spin text-neural-silver' : status === 'success' ? 'text-neural-success' : 'text-neural-critical';
+    async function completeAuth() {
+      try {
+        if (!isSupabaseReady || !supabase) {
+          throw new Error('Supabase is not configured for this environment.');
+        }
+
+        const code = searchParams.get('code');
+        const error = searchParams.get('error');
+        const errorDescription = searchParams.get('error_description');
+
+        if (error) {
+          throw new Error(errorDescription || error);
+        }
+
+        if (!code) {
+          throw new Error('Missing authentication code.');
+        }
+
+        const { error: exchangeError } = await supabase.auth.exchangeCodeForSession(code);
+
+        if (exchangeError) {
+          throw exchangeError;
+        }
+
+        const {
+          data: { user },
+          error: userError,
+        } = await supabase.auth.getUser();
+
+        if (userError) {
+          throw userError;
+        }
+
+        if (user) {
+          await supabase.from('arc_profiles').upsert({
+            id: user.id,
+            email: user.email,
+            display_name:
+              user.user_metadata?.full_name ||
+              user.user_metadata?.name ||
+              user.email ||
+              'AI Reality Check User',
+            updated_at: new Date().toISOString(),
+          });
+        }
+
+        if (!cancelled) {
+          setStatus('success');
+          setMessage('Sign in complete. Redirecting...');
+        }
+
+        const returnTo = getSafeReturnTo(searchParams.get('returnTo'));
+        window.setTimeout(() => {
+          navigate(returnTo || '/reality-check', { replace: true });
+        }, 700);
+      } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : 'Unable to complete sign in.';
+        if (!cancelled) {
+          setStatus('error');
+          setMessage(errorMessage);
+        }
+      }
+    }
+
+    completeAuth();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [navigate, searchParams]);
 
   return (
-    <div className="mx-auto max-w-xl rounded-3xl border border-white/10 bg-white/[0.04] p-8 text-center shadow-signal-white">
-      <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl border border-white/15 bg-black/40">
-        <Icon className={`h-7 w-7 ${iconClass}`} />
-      </div>
-      <p className="mt-5 text-xs uppercase tracking-[0.3em] text-neural-faint">Secure callback</p>
-      <h1 className="mt-3 text-3xl font-semibold text-white">{status === 'error' ? 'Magic link needs attention' : 'Completing sign-in'}</h1>
-      <p className="mt-3 text-sm text-neural-muted">{message}</p>
-      {status === 'error' && (
-        <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:justify-center">
-          <button onClick={() => navigate('/auth', { replace: true })} className="arc-button-primary px-4 py-2 text-sm">
-            Request a new link
-          </button>
-          <button onClick={() => navigate(returnTo, { replace: true })} className="arc-button-secondary px-4 py-2 text-sm">
-            Continue without signing in
-          </button>
-        </div>
-      )}
-    </div>
+    <main className="min-h-screen bg-black px-6 py-16 text-white">
+      <section className="mx-auto max-w-2xl rounded-3xl border border-white/10 bg-white/[0.04] p-8 shadow-2xl">
+        <p className="mb-3 text-sm uppercase tracking-[0.3em] text-white/50">
+          AI Reality Check
+        </p>
+
+        <h1 className="mb-4 text-4xl font-bold tracking-tight">
+          {status === 'loading' && 'Completing sign in'}
+          {status === 'success' && 'You are signed in'}
+          {status === 'error' && 'Sign in needs attention'}
+        </h1>
+
+        <p className="text-lg leading-8 text-white/70">{message}</p>
+
+        {status === 'error' && (
+          <div className="mt-8 flex flex-wrap gap-3">
+            <button
+              type="button"
+              onClick={() => navigate('/auth', { replace: true })}
+              className="rounded-full bg-white px-5 py-3 font-semibold text-black transition hover:bg-white/80"
+            >
+              Try again
+            </button>
+
+            <button
+              type="button"
+              onClick={() => navigate('/', { replace: true })}
+              className="rounded-full border border-white/15 px-5 py-3 font-semibold text-white transition hover:bg-white/10"
+            >
+              Go home
+            </button>
+          </div>
+        )}
+      </section>
+    </main>
   );
 }
