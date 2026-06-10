@@ -1,11 +1,10 @@
 import { useEffect, useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
-import { supabase, isSupabaseReady } from '../lib/supabaseClient';
-import { getSafeReturnTo } from '../lib/authRedirect';
+import { useNavigate } from 'react-router-dom';
+import { getReturnToFromSearch } from '../lib/authRedirect';
+import { supabase } from '../lib/supabaseClient';
 
 export default function AuthCallbackPage() {
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
   const [status, setStatus] = useState<'loading' | 'success' | 'error'>('loading');
   const [message, setMessage] = useState('Completing sign in...');
 
@@ -14,13 +13,14 @@ export default function AuthCallbackPage() {
 
     async function completeAuth() {
       try {
-        if (!isSupabaseReady || !supabase) {
+        if (!supabase) {
           throw new Error('Supabase is not configured for this environment.');
         }
 
-        const code = searchParams.get('code');
-        const error = searchParams.get('error');
-        const errorDescription = searchParams.get('error_description');
+        const params = new URLSearchParams(window.location.search);
+        const code = params.get('code');
+        const error = params.get('error');
+        const errorDescription = params.get('error_description');
 
         if (error) {
           throw new Error(errorDescription || error);
@@ -46,7 +46,7 @@ export default function AuthCallbackPage() {
         }
 
         if (user) {
-          await supabase.from('arc_profiles').upsert({
+          const { error: profileError } = await supabase.from('arc_profiles').upsert({
             id: user.id,
             email: user.email,
             display_name:
@@ -56,6 +56,10 @@ export default function AuthCallbackPage() {
               'AI Reality Check User',
             updated_at: new Date().toISOString(),
           });
+
+          if (profileError) {
+            console.warn('Profile upsert failed:', profileError.message);
+          }
         }
 
         if (!cancelled) {
@@ -63,12 +67,14 @@ export default function AuthCallbackPage() {
           setMessage('Sign in complete. Redirecting...');
         }
 
-        const returnTo = getSafeReturnTo(searchParams.get('returnTo'));
+        const returnTo = getReturnToFromSearch(window.location.search);
+
         window.setTimeout(() => {
           navigate(returnTo || '/reality-check', { replace: true });
         }, 700);
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : 'Unable to complete sign in.';
+
         if (!cancelled) {
           setStatus('error');
           setMessage(errorMessage);
@@ -81,7 +87,7 @@ export default function AuthCallbackPage() {
     return () => {
       cancelled = true;
     };
-  }, [navigate, searchParams]);
+  }, [navigate]);
 
   return (
     <main className="min-h-screen bg-black px-6 py-16 text-white">
